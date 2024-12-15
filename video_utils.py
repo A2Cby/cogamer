@@ -35,6 +35,35 @@ def extract_frames(video_path: str, frame_rate: int, target_size: int = 512) -> 
     cap.release()
     return frames_base64
 
+@traceable
+def extract_segments(video_path: str, segment_length: int) -> List[str]:
+    """Extracts video into 10-second segments and returns paths to the segments."""
+    import subprocess
+    from pathlib import Path
+
+    output_dir = Path("data/segments")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Get video duration
+    cmd_duration = [
+        "ffprobe", "-v", "error", "-show_entries",
+        "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path
+    ]
+    duration = float(subprocess.check_output(cmd_duration).decode().strip())
+
+    segment_paths = []
+    for i, start in enumerate(range(0, int(duration), segment_length)):
+        segment_path = output_dir / f"segment_{i + 1}.mp4"
+        cmd_split = [
+            "ffmpeg", "-y", "-i", video_path,
+            "-ss", str(start), "-t", str(segment_length),
+            "-c", "copy", str(segment_path)
+        ]
+        subprocess.run(cmd_split, check=True)
+        segment_paths.append(str(segment_path))
+
+    print(f"Extracted {len(segment_paths)} segments.")
+    return segment_paths
 
 def transcribe(video_path: str) -> str:
     try:

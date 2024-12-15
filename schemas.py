@@ -1,8 +1,8 @@
 from pydantic import BaseModel, Field
 from typing import List
 
-class FrameAnalysis(BaseModel):
-    comments: str = Field(..., description="General commentary on the frame.")
+class VideoSegmentAnalysis(BaseModel):
+    comments: str = Field(..., description="General commentary on the segment.")
     recommendations: str = Field(..., description="Suggestions for improvement.")
     tricks_used: str = Field(..., description="Tricks or optimizations observed.")
     good_actions: str = Field(..., description="Actions done well.")
@@ -15,7 +15,3 @@ class Context(BaseModel):
     category: str
     focus_points: List[str]
     notes:  List[str]
-
-class DetectGameFocusPoints(BaseModel):
-    game: str = Field(..., description="The name of the game being played in the video.")
-    focus_points: List[str] = Field(..., description="Key points to focus on during the analysis.")

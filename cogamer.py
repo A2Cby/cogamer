@@ -58,7 +58,7 @@ URI = f"wss://{HOST}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.B
 
 # LangChain Model Setup for Frame Analysis
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-model = ChatOpenAI(model="gpt-4.1-nano", api_key=OPENAI_API_KEY)
+model = ChatOpenAI(model="gpt-4.1-mini", api_key=OPENAI_API_KEY)
 structured_llm_frame_analysis = model.with_structured_output(FrameAnalysis)
 structured_llm_detect_game_focus_points = model.with_structured_output(DetectGameFocusPoints)
 
@@ -697,8 +697,6 @@ Assistant:
                 tg.create_task(self.send_text())
                 tg.create_task(self.run_background_tasks(tg))
 
-                # The 'async with' block will automatically wait for all tasks in the TaskGroup to finish
-                # No need to call 'tg.wait_closed()'
 
         except asyncio.CancelledError:
             logging.info("Agent shutdown requested.")
@@ -718,8 +716,14 @@ def cogamer(chosen_voice="Fenrir"):
 # Main Execution
 # -----------------------------
 
+import argparse
 if __name__ == "__main__":
-    agent = Agent(global_context=global_context, chosen_voice="Fenrir")
+    p = argparse.ArgumentParser()
+    p.add_argument("voice", nargs="?", default="Fenrir",
+                   help="Which copilot voice to use")
+    args = p.parse_args()
+
+    agent = Agent(global_context=global_context, chosen_voice=args.voice)
     try:
         asyncio.run(agent.run())
     except KeyboardInterrupt:

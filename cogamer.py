@@ -1,44 +1,36 @@
-# cogamer.py
 import datetime
 import asyncio
 import base64
 import json
 import io
-import os
+from time import monotonic
+
 import pyaudio
 import PIL.Image
 import mss
 import mss.tools
-import dotenv
 import logging
-
+import time
 import os, sys
 from dotenv import load_dotenv
+import multiprocessing
+
+from prompts.prompts import tools_custom, system_instruction
+from video_player import VideoType,  player_process
 
 base_path = getattr(sys, "_MEIPASS", os.getcwd())
 dotenv_path = os.path.join(base_path, ".env")
 
 load_dotenv(dotenv_path)
 
-from websockets.asyncio.client import connect
-from langsmith import traceable
+
 from typing import List, Dict
 from langchain_openai import ChatOpenAI
 from schemas import FrameAnalysis, Context, DetectGameFocusPoints
 from langchain_core.messages import HumanMessage
+from containers import CogamerContainer
 
-# -----------------------------
-# Configuration
-# -----------------------------
-import sys, os, ssl, certifi
-
-if getattr(sys, 'frozen', False):
-    cert_path = os.path.join(sys._MEIPASS, os.path.basename(certifi.where()))
-else:
-    cert_path = certifi.where()
-
-ssl_context = ssl.create_default_context(cafile=cert_path)
-
+import os, ssl
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -54,7 +46,7 @@ CHUNK_SIZE = 512
 HOST = "generativelanguage.googleapis.com"
 MODEL = "gemini-2.0-flash-exp"
 API_KEY = os.environ.get("GEMINI_API_KEY")
-URI = f"wss://{HOST}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={API_KEY}"
+URI = f"wss://{HOST}/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={API_KEY}"
 
 # LangChain Model Setup for Frame Analysis
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -62,9 +54,6 @@ model = ChatOpenAI(model="gpt-4.1-mini", api_key=OPENAI_API_KEY)
 structured_llm_frame_analysis = model.with_structured_output(FrameAnalysis)
 structured_llm_detect_game_focus_points = model.with_structured_output(DetectGameFocusPoints)
 
-# -----------------------------
-# Global Context Class
-# -----------------------------
 
 class GlobalContext:
     def __init__(self):
@@ -77,23 +66,23 @@ class GlobalContext:
         self.notes = []
         self.frame_analysis_results = []
 
-    @traceable
+    # @traceable
     def add_message(self, role: str, text: str):
         self.conversation_history.append((role, text))
 
-    @traceable
+    # @traceable
     def get_history(self):
         return self.conversation_history
 
-    @traceable
+    # @traceable
     def set_preference(self, key: str, value):
         self.user_preferences[key] = value
 
-    @traceable
+    # @traceable
     def get_preference(self, key: str, default=None):
         return self.user_preferences.get(key, default)
 
-    @traceable
+    # @traceable
     def to_json(self):
         return {
             "conversation_history": self.conversation_history,
@@ -108,11 +97,8 @@ class GlobalContext:
 
 global_context = GlobalContext()
 
-# -----------------------------
-# Background Frame Analysis
-# -----------------------------
 
-@traceable
+# @traceable
 def detect_game_and_focus_points(frames_data: List[str]) -> Dict:
     """Analyze random frames to detect the game and focus points."""
     logging.info("Analyzing frames to detect game and focus points...")
@@ -138,7 +124,7 @@ Be specific, professional, and use gaming terminology.
     logging.info(f"Game Detection Result: {analysis}")
     return analysis
 
-@traceable
+# @traceable
 def analyze_frame(frame_id: int, frames_data: List[str], context: Context) -> Dict:
     """Analyze a batch of frames and return the structured output."""
     logging.info(f"Analyzing frames {frame_id-10}-{frame_id} seconds...")
@@ -170,7 +156,7 @@ Provide the following:
     logging.info(f"Frame Analysis Result: {analysis_result}")
     return analysis_result
 
-@traceable
+# @traceable
 def summarize_results(results: List[dict], context: Context) -> str:
     """Summarize the frame analysis results."""
     logging.info("Summarizing analysis results...")
@@ -187,7 +173,7 @@ def summarize_results(results: List[dict], context: Context) -> str:
     logging.info(f"Summary: {summary_json}")
     return summary_json
 
-@traceable
+# @traceable
 def generate_end_report(summary: str) -> str:
     """Generate an end report summarizing the entire gameplay session and providing recommendations for improvement."""
     logging.info("Generating end report...")
@@ -212,20 +198,20 @@ Write a detailed report highlighting:
 # Tool Functions
 # -----------------------------
 
-@traceable
+# @traceable
 async def save_user_preferences(text):
     """Save user preferences to a file."""
     with open('user_preferences.txt', 'w') as f:
         f.write(text)
     logging.info("User preferences saved to 'user_preferences.txt'.")
 
-@traceable
+# @traceable
 async def remember_user_preferences(key: str, value: str):
     """Store user preferences in memory."""
     global_context.set_preference(key, value)
     logging.info(f"Preference '{key}' set to '{value}'.")
 
-@traceable
+# @traceable
 async def perform_game_detection(frames_data: List[str]):
     """Perform game detection and update global context."""
     analysis = await asyncio.to_thread(detect_game_and_focus_points, frames_data)
@@ -269,7 +255,7 @@ async def handle_tool_call(ws, tool_call):
         }
     }
 
-    await ws.send(json.dumps(msg))
+    await ws.force_send(json.dumps(msg))
     logging.info(f"Tool response sent for function '{function_name}'.")
 
 # -----------------------------
@@ -277,7 +263,9 @@ async def handle_tool_call(ws, tool_call):
 # -----------------------------
 
 class Agent:
-    def __init__(self, global_context: GlobalContext, chosen_voice: str ="Fenrir"):
+    RECONNECTION_INTERVAL = 60*7  # seconds
+    def __init__(self, parent_connection, global_context: GlobalContext, chosen_voice: str ="Fenrir"):
+        self._parent_connection = parent_connection
         self.global_context = global_context
         self.ws = None
         self.audio_in_queue = None
@@ -286,53 +274,16 @@ class Agent:
         self.collected_frames = []  # Store raw frames as base64 for analysis
         self.frame_counter = 0
         self.chosen_voice = chosen_voice
+        self._ssl_context = ssl.create_default_context()
+        self._ssl_context.check_hostname = False
+        self._ssl_context.verify_mode = ssl.CERT_NONE
+        self.ws_client = CogamerContainer.ws_client()
+        self._last_connection_time: float = time.monotonic()
 
-    @traceable
+    # @traceable
     async def startup(self, tools):
         """Initial setup for the WebSocket connection."""
-        msg = {
-            "parts": [
-                {
-                    "text": """
-I am your friendly gaming assistant, dedicated to enhancing your gaming experience. My purpose is to support you in playing games, offering strategic advice, and providing the encouragement you need to excel and enjoy every session.
 
-**Roles and Social Frames:**
-
-1. **You (The Gamer):**
-   - **Identity:** You are an enthusiastic and committed gamer, passionate about improving your skills and immersing yourself in diverse gaming worlds.
-   - **Perspective:** You seek actionable advice, constructive feedback, and motivational support to overcome challenges and achieve your gaming goals.
-   - **Expectations:** You desire an assistant who is knowledgeable, approachable, and responsive, offering guidance that is both practical and uplifting.
-
-2. **I (The Assistant):**
-   - **Identity:** I am a reliable and personable gaming companion with expertise in various games and gaming strategies.
-   - **Perspective:** I approach our interactions with empathy and positivity, aiming to build a supportive and engaging relationship.
-   - **Responsibilities:** I provide real-time tips, analyze gameplay mechanics, suggest effective strategies, and offer moral support to help you achieve your gaming objectives.
-
-3. **The Game:**
-   - **Identity:** The game serves as our interactive playground, encompassing its unique rules, challenges, and community dynamics.
-   - **Perspective:** I view the game as a platform for growth, competition, and enjoyment, where strategic thinking and teamwork lead to success.
-   - **Influence:** The game shapes our interactions by presenting opportunities and obstacles that I help you navigate effectively.
-
-**Key Attributes:**
-
-- **Supportive and Encouraging:** I am always here to uplift your spirits and motivate you, especially during challenging moments.
-- **Knowledgeable and Insightful:** I possess a deep understanding of various games, including their mechanics, strategies, and updates.
-- **Responsive and Adaptive:** I tailor my advice based on your current gameplay, preferences, and progress, ensuring that my guidance is relevant and effective.
-- **Clear and Concise Communication:** I deliver information in an easy-to-understand manner, avoiding unnecessary complexity.
-- **Proactive Assistance:** I anticipate potential challenges and offer solutions before issues escalate, ensuring a smooth gaming experience.
-
-**Objective:**
-To foster a collaborative and enjoyable gaming environment where my support and expertise empower you to improve your skills, overcome challenges, and fully enjoy your gaming experiences.
-
-**Tone and Language:**
-I maintain a friendly and approachable tone, using positive and encouraging language. My advice and feedback are delivered constructively, fostering a sense of partnership and mutual respect.
-
-Together, we will create memorable gaming moments, achieve your gaming aspirations, and ensure that every session is both fun and rewarding.
-"""
-                }
-            ],
-            "role": "model"
-        }
 
 
         setup_msg = {
@@ -350,23 +301,24 @@ Together, we will create memorable gaming moments, achieve your gaming aspiratio
                         },
                     "temperature": 0,
                     },
-                "system_instruction": msg,
+                "system_instruction": system_instruction,
                 "tools": tools
             }
         }
-        await self.ws.send(json.dumps(setup_msg))
-        setup_response = json.loads(await self.ws.recv())
+        await self.ws_client.force_send(json.dumps(setup_msg))
+        setup_response = await self.ws_client.force_receive()
         logging.info("WebSocket connection established and setup complete.")
 
-    @traceable
+
+    # @traceable
     async def send_text(self):
         """Handle user text input and send to the model."""
-        while True:
+        while True:  # todo: handle
             text = await asyncio.to_thread(input, "You: ")
             if text.lower() == "q":
                 # When user quits, generate final report
                 await self.generate_final_report()
-                await self.ws.close()
+                await self.ws_client.disconnect()
                 break
             self.global_context.add_message("user", text)
 
@@ -393,7 +345,15 @@ Assistant:
                     "turns": [{"role": "user", "parts": [{"text": prompt}]}],
                 }
             }
-            await self.ws.send(json.dumps(msg))
+            # await self.ws_client.force_send(json.dumps(msg))
+            json_msg = json.dumps(msg)
+            try:
+                await self.ws_client.send(json_msg)
+            except (self.ws_client.WebSocketConnectionError, self.ws_client.WebSocketConnectionClosed):
+                await self.ws_client.connect()
+                await self.startup(tools=[{'function_declarations': TOOLS_CUSTOM},
+                                   {'google_search': {}}])
+                await self.ws_client.send(json_msg)
             logging.info("Message sent to assistant.")
 
     def _capture_screen_frame(self) -> str:
@@ -413,11 +373,15 @@ Assistant:
         image_encoded = base64.b64encode(image_io.read()).decode()
         return image_encoded
 
-    @traceable
+    # @traceable
     async def stream_screen_frames(self, interval: float = 1.0):
         """Continuously capture and send screen frames."""
         while True:
-            frame = await asyncio.to_thread(self._capture_screen_frame)
+            try:
+                frame = await asyncio.to_thread(self._capture_screen_frame)  # todo: handle
+            except Exception as e:
+                logging.warning(f"Failed to capture screen frame: {e}")
+                continue
             # Collect frames for periodic analysis
             self.collected_frames.append(frame)
             self.frame_counter += 1
@@ -437,7 +401,7 @@ Assistant:
 
             await asyncio.sleep(interval)
 
-    @traceable
+    # @traceable
     async def run_background_analysis(self, frames: List[str]):
         """Run background analysis on collected frames."""
         logging.info("Running background analysis...")
@@ -475,7 +439,7 @@ Assistant:
             except Exception as e:
                 logging.error(f"Failed to save frame analysis: {e}")
 
-    @traceable
+    # @traceable
     async def listen_audio(self):
         """Capture audio from the microphone and send to the model."""
         pya_in = pyaudio.PyAudio()
@@ -491,30 +455,46 @@ Assistant:
         logging.info("Audio stream started.")
 
         while True:
-            data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, exception_on_overflow=False)
-            msg = {
-                "realtime_input": {
-                    "media_chunks": [
-                        {
-                            "data": base64.b64encode(data).decode(),
-                            "mime_type": "audio/pcm",
-                        }
-                    ]
+            try:  # todo: handle
+                data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, exception_on_overflow=False)
+                msg = {
+                    "realtime_input": {
+                        "media_chunks": [
+                            {
+                                "data": base64.b64encode(data).decode(),
+                                "mime_type": "audio/pcm",
+                            }
+                        ]
+                    }
                 }
-            }
-            await self.out_queue.put(msg)
+                await self.out_queue.put(msg)
+            except Exception as e:
+                logging.warning(f"Failed to receive audio stream: {e}")
+                continue
 
-    @traceable
+    # @traceable
     async def send_realtime(self):
         """Send real-time media inputs to the model."""
         while True:
-            msg = await self.out_queue.get()
-            await self.ws.send(json.dumps(msg))
+            try:  # todo: handle
+                msg = await self.out_queue.get()
+                # await self.ws_client.force_send(json.dumps(msg))
+                json_msg = json.dumps(msg)
+                try:
+                    await self.ws_client.send(json_msg)
+                except (self.ws_client.WebSocketConnectionError, self.ws_client.WebSocketConnectionClosed):
+                    continue
+            except Exception as e:
+                logging.warning(f"Failed to send message: {e}")
+                continue
 
-    @traceable
+    # @traceable
     async def receive_audio(self):
         """Receive audio responses from the model and play them."""
-        async for raw_response in self.ws:
+        while True:
+            raw_response = await self.ws_client.force_receive()
+            if raw_response is None:
+                continue
             response = json.loads(raw_response)
             inline_data = (
                 response
@@ -525,31 +505,40 @@ Assistant:
                 .get("data")
             )
             if inline_data:
+                self._parent_connection.send(VideoType.SPEECH)
                 pcm_data = base64.b64decode(inline_data)
                 self.audio_in_queue.put_nowait(pcm_data)
 
             try:
                 turn_complete = response["serverContent"]["turnComplete"]
             except KeyError:
-                pass
+                continue
             else:
                 if turn_complete:
                     # If you interrupt the model, it sends an end_of_turn.
                     # For interruptions to work, we need to empty out the audio queue
                     # Because it may have loaded much more audio than has played yet.
-                    print("\nEnd of turn")
+                    print("\nEnd of turn in receive audio ", time.time())
+                    self._parent_connection.send(VideoType.SILENCE)
                     while not self.audio_in_queue.empty():
                         self.audio_in_queue.get_nowait()
+                        print("Removed audio from queue", time.time())
+                    if monotonic() - self._last_connection_time > self.RECONNECTION_INTERVAL:
+                        self._last_connection_time = monotonic()
+                        await self.ws_client.disconnect()
+                        await self.ws_client.init_connect()
+                        await self.startup(tools=[{'function_declarations': tools_custom},
+                                                  {'google_search': {}}])
 
             tool_call = response.get('toolCall')
             if tool_call is not None:
-                await handle_tool_call(self.ws, tool_call)
+                await handle_tool_call(self.ws_client, tool_call)
 
             server_content = response.get('serverContent')
             if server_content:
                 self.handle_server_content(server_content)
 
-    @traceable
+    # @traceable
     async def play_audio(self):
         """Play received audio responses."""
         pya_out = pyaudio.PyAudio()
@@ -562,27 +551,35 @@ Assistant:
         logging.info("Audio playback started.")
 
         while True:
-            bytestream = await self.audio_in_queue.get()
-            await asyncio.to_thread(stream.write, bytestream)
+            try:  # todo: handle
+                bytestream = await self.audio_in_queue.get()
+                await asyncio.to_thread(stream.write, bytestream)
+            except Exception as e:
+                logging.warning(f"Failed to play audio: {e}")
+                continue
 
-    @traceable
+    # @traceable
     async def periodic_context_update(self, interval: int = 60):
         """Periodically update the assistant with the global context once per minute."""
         while True:
             await asyncio.sleep(interval)
-            # Summarize the analysis results
-            summary = await asyncio.to_thread(summarize_results, self.global_context.frame_analysis_results, Context(
-                game=self.global_context.game,
-                category=self.global_context.category,
-                focus_points=self.global_context.focus_points,
-                notes=self.global_context.notes
-            ))
-            # Optionally, you can send this summary to the assistant's memory or use it to influence responses
-            logging.info("Periodic Context Update:")
-            logging.info(summary)
-            # Here, you can implement logic to update the assistant's knowledge based on the summary
+            try:  # todo: handle
+                # Summarize the analysis results
+                summary = await asyncio.to_thread(summarize_results, self.global_context.frame_analysis_results, Context(
+                    game=self.global_context.game,
+                    category=self.global_context.category,
+                    focus_points=self.global_context.focus_points,
+                    notes=self.global_context.notes
+                ))
+                # Optionally, you can send this summary to the assistant's memory or use it to influence responses
+                logging.info("Periodic Context Update:")
+                logging.info(summary)
+                # Here, you can implement logic to update the assistant's knowledge based on the summary
+            except Exception as e:
+                logging.warning(f"Failed to update context: {e}")
+                continue
 
-    @traceable
+    # @traceable
     async def generate_final_report(self):
         """Generate and save the final report summarizing the gaming session."""
         logging.info("Generating final report...")
@@ -594,14 +591,13 @@ Assistant:
         ))
         end_report = await asyncio.to_thread(generate_end_report, summary)
         logging.info("\n--- Final Summarized Report ---")
-        print(end_report)
         os.makedirs("data", exist_ok=True)
         os.makedirs("data/summary_reports", exist_ok=True)
         with open("data/summary_reports/end_report.txt", "w") as f:
             f.write(end_report)
         logging.info("Final report saved to 'data/end_report.txt'.")
 
-    @traceable
+    # @traceable
     def handle_server_content(self, server_content):
         """Handle additional server content if needed."""
         model_turn = server_content.get('modelTurn')
@@ -629,62 +625,24 @@ Assistant:
             # Handle grounding metadata if needed
             pass
 
-    @traceable
+    # @traceable
     async def run_background_tasks(self, task_group: asyncio.TaskGroup):
         """Run background tasks such as periodic context updates."""
         task_group.create_task(self.periodic_context_update())
 
-    @traceable
+    # @traceable
     async def run(self):
         """Run the agent by establishing WebSocket connection and starting tasks."""
+        process.start()
         try:
-            async with connect(URI, additional_headers={"Content-Type": "application/json"}) as ws, asyncio.TaskGroup() as tg:
-                self.ws = ws
-                tools_custom = [
-                    {
-                        "name": "save_user_preferences",
-                        "description": "Saves user preferences to a file."
-                    },
-                    {
-                        "name": "remember_user_preferences",
-                        "description": "Store user preferences in memory.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "key": {
-                                    "type": "string",
-                                    "description": "Preference name."
-                                },
-                                "value": {
-                                    "type": "string",
-                                    "description": "Preference value."
-                                }
-                            },
-                            "required": ["key", "value"]
-                        }
-                    },
-                    {
-                        "name": "perform_game_detection",
-                        "description": "Detect the game and key focus points from provided frames.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "frames": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "string",
-                                        "description": "Base64-encoded image frames."
-                                    },
-                                    "description": "List of base64-encoded image frames for game detection."
-                                }
-                            },
-                            "required": ["frames"]
-                        }
-                    }
-                ]
+            await self.ws_client.init_connect()
+            async with asyncio.TaskGroup() as tg:
                 await self.startup(tools=[{'function_declarations': tools_custom},
                                    {'google_search': {}}])
-
+                await self.ws_client.disconnect()
+                await self.ws_client.init_connect()
+                await self.startup(tools=[{'function_declarations': tools_custom},
+                                   {'google_search': {}}])
                 self.audio_in_queue = asyncio.Queue()
                 self.out_queue = asyncio.Queue(maxsize=10)
 
@@ -704,6 +662,8 @@ Assistant:
             logging.error("An error occurred:", exc_info=True)
             if self.audio_stream:
                 self.audio_stream.close()
+        finally:
+            await self.ws_client.disconnect()
 
 def cogamer(chosen_voice="Fenrir"):
     agent = Agent(global_context=global_context, chosen_voice=chosen_voice)
@@ -716,14 +676,11 @@ def cogamer(chosen_voice="Fenrir"):
 # Main Execution
 # -----------------------------
 
-import argparse
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("voice", nargs="?", default="Fenrir",
-                   help="Which copilot voice to use")
-    args = p.parse_args()
-
-    agent = Agent(global_context=global_context, chosen_voice=args.voice)
+    multiprocessing.freeze_support()
+    parent_conn, child_conn = multiprocessing.Pipe()
+    agent = Agent(parent_connection=parent_conn, global_context=global_context, chosen_voice="Fenrir")
+    process = multiprocessing.Process(target=player_process, args=(child_conn,))
     try:
         asyncio.run(agent.run())
     except KeyboardInterrupt:

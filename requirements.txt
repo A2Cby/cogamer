@@ -18,6 +18,7 @@ langsmith==0.2.6
 logging==0.4.9.6
 mss==10.0.0
 openai==1.58.1
+opencv-python==4.12.0.88
 orjson==3.10.12
 packaging==24.2
 pillow==11.0.0
@@ -39,4 +40,4 @@ typing_extensions==4.12.2
 urllib3==2.3.0
 websockets==14.1
 zope.interface==7.2
-tkinter==8.6
+dependency-injector==4.48.2

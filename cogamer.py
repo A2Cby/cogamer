@@ -280,6 +280,30 @@ class Agent:
         self.ws_client = CogamerContainer.ws_client()
         self._last_connection_time: float = time.monotonic()
 
+    async def send_to_gemini(self, message: dict):
+        json_msg = json.dumps(message)
+        try:
+            await self.ws_client.send(json_msg)
+        except (self.ws_client.WebSocketConnectionError, self.ws_client.WebSocketConnectionClosed):
+            await self.ws_client.connect()
+            await self.startup(tools=[{'function_declarations': tools_custom},
+                                      {'google_search': {}}])
+            await self.ws_client.send(json_msg)
+        logging.info("Message sent to assistant.")
+
+    async def receive_from_gemini(self) -> dict | None:
+        try:
+            message = await self.ws_client.receive()
+        except (self.ws_client.WebSocketConnectionError, self.ws_client.WebSocketConnectionClosed):
+            await self.ws_client.connect()
+            await self.startup(tools=[{'function_declarations': tools_custom},
+                                      {'google_search': {}}])
+            message = await self.ws_client.receive()  # todo: check!!! Maybe del!
+        except Exception as e:
+            self._logger.warning(f"Failed to receive message: {e}")
+            return None
+        return json.loads(message)
+
     # @traceable
     async def startup(self, tools):
         """Initial setup for the WebSocket connection."""
@@ -306,7 +330,8 @@ class Agent:
             }
         }
         await self.ws_client.force_send(json.dumps(setup_msg))
-        setup_response = await self.ws_client.force_receive()
+        # setup_response = await self.ws_client.force_receive()
+        setup_response = await self.receive_from_gemini()
         logging.info("WebSocket connection established and setup complete.")
 
 
@@ -351,7 +376,7 @@ Assistant:
                 await self.ws_client.send(json_msg)
             except (self.ws_client.WebSocketConnectionError, self.ws_client.WebSocketConnectionClosed):
                 await self.ws_client.connect()
-                await self.startup(tools=[{'function_declarations': TOOLS_CUSTOM},
+                await self.startup(tools=[{'function_declarations': tools_custom},
                                    {'google_search': {}}])
                 await self.ws_client.send(json_msg)
             logging.info("Message sent to assistant.")
@@ -492,12 +517,13 @@ Assistant:
     async def receive_audio(self):
         """Receive audio responses from the model and play them."""
         while True:
-            raw_response = await self.ws_client.force_receive()
-            if raw_response is None:
+            # raw_response = await self.ws_client.force_receive()
+            response_dict = await self.receive_from_gemini()
+            if response_dict is None:
                 continue
-            response = json.loads(raw_response)
+            # response = json.loads(raw_response)
             inline_data = (
-                response
+                response_dict
                 .get("serverContent", {})
                 .get("modelTurn", {})
                 .get("parts", [{}])[0]
@@ -510,7 +536,7 @@ Assistant:
                 self.audio_in_queue.put_nowait(pcm_data)
 
             try:
-                turn_complete = response["serverContent"]["turnComplete"]
+                turn_complete = response_dict["serverContent"]["turnComplete"]
             except KeyError:
                 continue
             else:
@@ -530,11 +556,11 @@ Assistant:
                         await self.startup(tools=[{'function_declarations': tools_custom},
                                                   {'google_search': {}}])
 
-            tool_call = response.get('toolCall')
+            tool_call = response_dict.get('toolCall')
             if tool_call is not None:
                 await handle_tool_call(self.ws_client, tool_call)
 
-            server_content = response.get('serverContent')
+            server_content = response_dict.get('serverContent')
             if server_content:
                 self.handle_server_content(server_content)
 

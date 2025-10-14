@@ -68,11 +68,78 @@ class GlobalContext:
 
     # @traceable
     def add_message(self, role: str, text: str):
+        """Добавляет сообщение в историю диалога."""
         self.conversation_history.append((role, text))
 
     # @traceable
     def get_history(self):
+        """Возвращает полную историю диалога."""
         return self.conversation_history
+
+    # @traceable
+    def get_recent_conversation(self, num_pairs: int = 3) -> list:
+        """
+        Возвращает последние N пар реплик (игрок-ассистент) для восстановления контекста.
+        
+        Args:
+            num_pairs: количество пар реплик для сохранения (по умолчанию 3)
+        
+        Returns:
+            Список кортежей (role, text) с последними репликами
+        """
+        if not self.conversation_history:
+            return []
+        
+        # Берем последние num_pairs * 2 сообщений (каждая пара = игрок + ассистент)
+        recent_messages = self.conversation_history[-(num_pairs * 2):]
+        return recent_messages
+
+    # @traceable
+    def save_conversation_context(self, filepath: str = "data/conversation_context.json"):
+        """
+        Сохраняет последние 3 пары реплик в JSON файл для восстановления после перезапуска.
+        
+        Args:
+            filepath: путь к файлу для сохранения контекста
+        """
+        context_data = {
+            "recent_conversation": self.get_recent_conversation(num_pairs=3),
+            "game": self.game,
+            "category": self.category,
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+        
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(context_data, f, indent=2, ensure_ascii=False)
+            logging.info(f"Контекст диалога сохранен в '{filepath}'")
+        except Exception as e:
+            logging.error(f"Ошибка при сохранении контекста: {e}")
+
+    # @traceable
+    def load_conversation_context(self, filepath: str = "data/conversation_context.json") -> dict:
+        """
+        Загружает сохраненный контекст диалога из JSON файла.
+        
+        Args:
+            filepath: путь к файлу с сохраненным контекстом
+        
+        Returns:
+            Словарь с сохраненным контекстом или пустой словарь при ошибке
+        """
+        try:
+            if os.path.exists(filepath):
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    context_data = json.load(f)
+                logging.info(f"Контекст диалога загружен из '{filepath}'")
+                return context_data
+            else:
+                logging.info("Файл контекста не найден, начинаем с чистой истории")
+                return {}
+        except Exception as e:
+            logging.error(f"Ошибка при загрузке контекста: {e}")
+            return {}
 
     # @traceable
     def set_preference(self, key: str, value):
@@ -306,9 +373,33 @@ class Agent:
 
     # @traceable
     async def startup(self, tools):
-        """Initial setup for the WebSocket connection."""
-
-
+        """
+        Инициализация WebSocket соединения с загрузкой сохраненного контекста диалога.
+        При перезапуске восстанавливает последние 3 пары реплик для сохранения преемственности.
+        """
+        
+        # Загружаем сохраненный контекст диалога (если есть)
+        saved_context = self.global_context.load_conversation_context()
+        
+        # Формируем системную инструкцию с учетом истории диалога
+        enhanced_system_instruction = system_instruction
+        
+        if saved_context and saved_context.get("recent_conversation"):
+            # Добавляем информацию о предыдущем диалоге в системную инструкцию
+            conversation_summary = "\n\n--- КОНТЕКСТ ПРЕДЫДУЩЕГО ДИАЛОГА ---\n"
+            conversation_summary += "Вот последние реплики из нашего предыдущего разговора:\n\n"
+            
+            for role, text in saved_context["recent_conversation"]:
+                if role == "user":
+                    conversation_summary += f"Игрок: {text}\n"
+                elif role == "assistant":
+                    conversation_summary += f"Ассистент: {text}\n"
+            
+            conversation_summary += "\nПродолжай диалог естественно, учитывая этот контекст.\n"
+            conversation_summary += "--- КОНЕЦ КОНТЕКСТА ---\n"
+            
+            enhanced_system_instruction += conversation_summary
+            logging.info(f"Восстановлено {len(saved_context['recent_conversation'])} реплик из предыдущего диалога")
 
         setup_msg = {
             "setup": {
@@ -325,7 +416,7 @@ class Agent:
                         },
                     "temperature": 0,
                     },
-                "system_instruction": system_instruction,
+                "system_instruction": enhanced_system_instruction,
                 "tools": tools
             }
         }
@@ -515,7 +606,10 @@ Assistant:
 
     # @traceable
     async def receive_audio(self):
-        """Receive audio responses from the model and play them."""
+        """
+        Получает голосовые ответы от модели и воспроизводит их.
+        Также отслеживает текстовые ответы ассистента для сохранения в историю диалога.
+        """
         while True:
             # raw_response = await self.ws_client.force_receive()
             response_dict = await self.receive_from_gemini()
@@ -535,6 +629,19 @@ Assistant:
                 pcm_data = base64.b64decode(inline_data)
                 self.audio_in_queue.put_nowait(pcm_data)
 
+            # Извлекаем текстовый ответ ассистента (если есть) для сохранения в историю
+            text_part = (
+                response_dict
+                .get("serverContent", {})
+                .get("modelTurn", {})
+                .get("parts", [{}])[0]
+                .get("text")
+            )
+            if text_part and text_part.strip():
+                # Сохраняем ответ ассистента в историю
+                self.global_context.add_message("assistant", text_part.strip())
+                logging.info(f"Ответ ассистента добавлен в историю: {text_part[:50]}...")
+
             try:
                 turn_complete = response_dict["serverContent"]["turnComplete"]
             except KeyError:
@@ -549,12 +656,21 @@ Assistant:
                     while not self.audio_in_queue.empty():
                         self.audio_in_queue.get_nowait()
                         print("Removed audio from queue", time.time())
+                    
+                    # Проверка на необходимость переподключения
                     if monotonic() - self._last_connection_time > self.RECONNECTION_INTERVAL:
                         self._last_connection_time = monotonic()
+                        
+                        # ВАЖНО: Сохраняем контекст диалога ПЕРЕД переподключением
+                        logging.info("Время переподключения. Сохраняем контекст диалога...")
+                        self.global_context.save_conversation_context()
+                        
+                        # Переподключаемся
                         await self.ws_client.disconnect()
                         await self.ws_client.init_connect()
                         await self.startup(tools=[{'function_declarations': tools_custom},
                                                   {'google_search': {}}])
+                        logging.info("Переподключение завершено с восстановлением контекста")
 
             tool_call = response_dict.get('toolCall')
             if tool_call is not None:

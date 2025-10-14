@@ -101,15 +101,7 @@ class VideoPlayer:
             if command in self.videos and command != self.current_video_type:
                 self._switch_video(command)
 
-    def _get_random_silence_type(self) -> VideoType:
-        choices = [VideoType.SILENCE_NO_BLINK, VideoType.SILENCE]
-        weights = [80, 20]
-        return random.choices(choices, weights=weights)[0]
-
     def _switch_video(self, video_type: VideoType):
-        if video_type == VideoType.SILENCE:
-            video_type = self._get_random_silence_type()
-        
         self.current_video_type = video_type
         self.frame_index = 0
 

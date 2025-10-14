@@ -4,7 +4,7 @@ new_width, new_height = 640, 360
 import cv2
 import numpy as np
 
-from video_player import SilencePath, SpeechPath, VideoPath
+from video_player import SilencePath, SpeechPath, SilencePath2, VideoPath
 
 def load_and_process_video(video_path: VideoPath, new_size):
     video_file = cv2.VideoCapture(video_path.video_path)
@@ -25,3 +25,4 @@ def load_and_process_video(video_path: VideoPath, new_size):
 if __name__ == '__main__':
     load_and_process_video(SpeechPath, (new_width, new_height))
     load_and_process_video(SilencePath, (new_width, new_height))
+    load_and_process_video(SilencePath2, (new_width, new_height))

@@ -3,12 +3,14 @@ from PIL import Image, ImageTk
 import numpy as np
 import math
 import cv2
+import random
 from pydantic import BaseModel
 from enum import StrEnum, auto
 
 
 class VideoType(StrEnum):
     SILENCE = auto()
+    SILENCE_NO_BLINK = auto()
     SPEECH = auto()
 
 
@@ -22,6 +24,11 @@ SilencePath = VideoPath(
     video_path="data/video/Idle.mp4",
     video_type=VideoType.SILENCE,
     np_path="data/np/silence_cache.npy"
+)
+SilencePath2 = VideoPath(
+    video_path="data/video/Idle_2.mp4",
+    video_type=VideoType.SILENCE_NO_BLINK,
+    np_path="data/np/silence_cache_2.npy"
 )
 SpeechPath = VideoPath(
     video_path="data/video/Speaking.mp4",
@@ -79,7 +86,7 @@ class VideoPlayer:
         self.root.geometry(f"{self.window_width}x{self.window_height}+{x_pos}+{y_pos}")
 
     def _load_and_preprocess_videos(self):
-        for path_obj in [SilencePath, SpeechPath]:
+        for path_obj in [SilencePath, SilencePath2, SpeechPath]:
             all_frames = np.load(path_obj.np_path)
             resized_frames = []
             for frame in all_frames:
@@ -100,6 +107,11 @@ class VideoPlayer:
 
     def _update_frame(self):
         self._check_for_commands()
+        if self.frame_index == 0 and self.current_video_type in [VideoType.SILENCE, VideoType.SILENCE_NO_BLINK]:
+            if random.random() < 0.2:
+                self.current_video_type = VideoType.SILENCE 
+            else:
+                self.current_video_type = VideoType.SILENCE_NO_BLINK
 
         current_frames = self.videos[self.current_video_type]
 
@@ -115,7 +127,7 @@ class VideoPlayer:
         self.root.after(20, self._update_frame)
 
     def run(self):
-        self._switch_video(VideoType.SILENCE)  # Устанавливаем начальное видео
+        self._switch_video(VideoType.SILENCE)
         self._update_frame()
         self.root.mainloop()
 

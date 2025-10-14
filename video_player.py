@@ -9,8 +9,8 @@ from enum import StrEnum, auto
 
 
 class VideoType(StrEnum):
-    SILENCE = auto()  # Молчание с морганием (20% случаев)
-    SILENCE_NO_BLINK = auto()  # Молчание без моргания (80% случаев)
+    SILENCE = auto()
+    SILENCE_NO_BLINK = auto()
     SPEECH = auto()
 
 
@@ -86,7 +86,6 @@ class VideoPlayer:
         self.root.geometry(f"{self.window_width}x{self.window_height}+{x_pos}+{y_pos}")
 
     def _load_and_preprocess_videos(self):
-        # Загружаем все видео: оба варианта молчания и речь
         for path_obj in [SilencePath, SilencePath2, SpeechPath]:
             all_frames = np.load(path_obj.np_path)
             resized_frames = []
@@ -103,18 +102,11 @@ class VideoPlayer:
                 self._switch_video(command)
 
     def _get_random_silence_type(self) -> VideoType:
-        """
-        Случайный выбор между двумя типами молчания:
-        - 80% вероятность: SILENCE_NO_BLINK (без моргания) 
-        - 20% вероятность: SILENCE (с морганием)
-        Это создает эффект спонтанного и редкого моргания робота
-        """
         choices = [VideoType.SILENCE_NO_BLINK, VideoType.SILENCE]
-        weights = [80, 20]  # 80% без моргания, 20% с морганием
+        weights = [80, 20]
         return random.choices(choices, weights=weights)[0]
 
     def _switch_video(self, video_type: VideoType):
-        # Если переключаемся на молчание, случайно выбираем вариант с/без моргания
         if video_type == VideoType.SILENCE:
             video_type = self._get_random_silence_type()
         
@@ -123,15 +115,11 @@ class VideoPlayer:
 
     def _update_frame(self):
         self._check_for_commands()
-
-        # Если видео молчания закончилось и начинается заново - делаем новый случайный выбор
-        # Математическая формула: random.random() возвращает число от 0.0 до 1.0
-        # Если число < 0.2 (то есть в 20% случаев) - выбираем видео с морганием
         if self.frame_index == 0 and self.current_video_type in [VideoType.SILENCE, VideoType.SILENCE_NO_BLINK]:
-            if random.random() < 0.2:  # 20% вероятность
-                self.current_video_type = VideoType.SILENCE  # С морганием (Idle.mp4)
-            else:  # 80% вероятность
-                self.current_video_type = VideoType.SILENCE_NO_BLINK  # Без моргания (Idle_2.mp4)
+            if random.random() < 0.2:
+                self.current_video_type = VideoType.SILENCE 
+            else:
+                self.current_video_type = VideoType.SILENCE_NO_BLINK
 
         current_frames = self.videos[self.current_video_type]
 
@@ -147,7 +135,6 @@ class VideoPlayer:
         self.root.after(20, self._update_frame)
 
     def run(self):
-        # Устанавливаем начальное видео молчания (случайный выбор с/без моргания)
         self._switch_video(VideoType.SILENCE)
         self._update_frame()
         self.root.mainloop()

@@ -15,7 +15,7 @@ import os, sys
 from dotenv import load_dotenv
 import multiprocessing
 
-from prompts.prompts import tools_custom, system_instruction
+from prompts.prompts import tools_custom, system_instruction, system_instruction_reconnection
 from video_player import VideoType,  player_process
 
 base_path = getattr(sys, "_MEIPASS", os.getcwd())
@@ -61,85 +61,32 @@ class GlobalContext:
         self.user_preferences = {}
         self.custom_state = {}
         self.game = "Unknown"
+        self.game_description = ""
         self.category = "Unknown"
         self.focus_points = []
         self.notes = []
         self.frame_analysis_results = []
+        self.player_goal = "" 
+        self.conversation_language = None
 
     # @traceable
     def add_message(self, role: str, text: str):
-        """Добавляет сообщение в историю диалога."""
+        """Adds a message to the conversation history."""
         self.conversation_history.append((role, text))
+        logging.info(f"[DEBUG] Message added: role={role}, text={text[:30]}...")
+        logging.info(f"[DEBUG] After add: total={len(self.conversation_history)}, lang={self.conversation_language}")
 
     # @traceable
     def get_history(self):
-        """Возвращает полную историю диалога."""
         return self.conversation_history
 
     # @traceable
     def get_recent_conversation(self, num_pairs: int = 3) -> list:
-        """
-        Возвращает последние N пар реплик (игрок-ассистент) для восстановления контекста.
-        
-        Args:
-            num_pairs: количество пар реплик для сохранения (по умолчанию 3)
-        
-        Returns:
-            Список кортежей (role, text) с последними репликами
-        """
         if not self.conversation_history:
             return []
         
-        # Берем последние num_pairs * 2 сообщений (каждая пара = игрок + ассистент)
         recent_messages = self.conversation_history[-(num_pairs * 2):]
         return recent_messages
-
-    # @traceable
-    def save_conversation_context(self, filepath: str = "data/conversation_context.json"):
-        """
-        Сохраняет последние 3 пары реплик в JSON файл для восстановления после перезапуска.
-        
-        Args:
-            filepath: путь к файлу для сохранения контекста
-        """
-        context_data = {
-            "recent_conversation": self.get_recent_conversation(num_pairs=3),
-            "game": self.game,
-            "category": self.category,
-            "timestamp": datetime.datetime.now().isoformat()
-        }
-        
-        try:
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(context_data, f, indent=2, ensure_ascii=False)
-            logging.info(f"Контекст диалога сохранен в '{filepath}'")
-        except Exception as e:
-            logging.error(f"Ошибка при сохранении контекста: {e}")
-
-    # @traceable
-    def load_conversation_context(self, filepath: str = "data/conversation_context.json") -> dict:
-        """
-        Загружает сохраненный контекст диалога из JSON файла.
-        
-        Args:
-            filepath: путь к файлу с сохраненным контекстом
-        
-        Returns:
-            Словарь с сохраненным контекстом или пустой словарь при ошибке
-        """
-        try:
-            if os.path.exists(filepath):
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    context_data = json.load(f)
-                logging.info(f"Контекст диалога загружен из '{filepath}'")
-                return context_data
-            else:
-                logging.info("Файл контекста не найден, начинаем с чистой истории")
-                return {}
-        except Exception as e:
-            logging.error(f"Ошибка при загрузке контекста: {e}")
-            return {}
 
     # @traceable
     def set_preference(self, key: str, value):
@@ -156,7 +103,10 @@ class GlobalContext:
             "user_preferences": self.user_preferences,
             "custom_state": self.custom_state,
             "game": self.game,
+            "game_description": self.game_description,
             "category": self.category,
+            "player_goal": self.player_goal,
+            "conversation_language": self.conversation_language,
             "focus_points": self.focus_points,
             "notes": self.notes,
             "frame_analysis_results": self.frame_analysis_results
@@ -287,8 +237,35 @@ async def perform_game_detection(frames_data: List[str]):
     logging.info(f"Detected Game: {global_context.game}")
     logging.info(f"Focus Points: {global_context.focus_points}")
 
+# @traceable
+async def update_player_goal(goal: str):
+    global_context.player_goal = goal
+    logging.info(f"Player goal updated: '{goal}'")
+
+# @traceable
+async def update_game_info(game_name: str = None, description: str = None):
+    if game_name:
+        global_context.game = game_name
+        logging.info(f"Game name updated: '{game_name}'")
+    if description:
+        global_context.game_description = description
+        logging.info(f"Game description updated: '{description}'")
+
+# @traceable
+async def update_conversation_language(language: str):
+    global_context.conversation_language = language
+    logging.info(f"✅ Conversation language detected and set: '{language}'")
+
 async def handle_tool_call(ws, tool_call):
-    """Handles incoming tool calls from Gemini and sends the appropriate response."""
+    """
+    Handles tool calls from Gemini and sends corresponding responses.
+    Supported tools:
+    - save_user_preferences: Save user preferences
+    - remember_user_preferences: Remember preferences in memory
+    - perform_game_detection: Detect game from frames
+    - update_player_goal: Update the current player goal
+    - update_game_info: Update game information
+    """
     logging.info(f"Handling tool call: {tool_call}")
     function_call = tool_call["functionCalls"][0]
     function_name = function_call["name"]
@@ -297,11 +274,13 @@ async def handle_tool_call(ws, tool_call):
     if function_name == "save_user_preferences":
         await save_user_preferences(str(global_context.to_json()))
         response = "User preferences saved to 'user_preferences.txt'."
+    
     elif function_name == "remember_user_preferences":
         key = arguments.get("key")
         value = arguments.get("value")
         await remember_user_preferences(key, value)
         response = f"Preference '{key}' set to '{value}'."
+    
     elif function_name == "perform_game_detection":
         frames = arguments.get("frames", [])
         if frames:
@@ -309,6 +288,28 @@ async def handle_tool_call(ws, tool_call):
             response = f"Game detection performed. Current game: {global_context.game}."
         else:
             response = "No frames provided for game detection."
+    
+    elif function_name == "update_player_goal":
+        goal = arguments.get("goal", "")
+        if goal:
+            await update_player_goal(goal)
+            response = f"Player goal updated: '{goal}'"
+        else:
+            response = "Goal not specified."
+    elif function_name == "update_game_info":
+        game_name = arguments.get("game_name")
+        description = arguments.get("description")
+        await update_game_info(game_name=game_name, description=description)
+        response = f"Game information updated. Game: '{global_context.game}'"
+    
+    elif function_name == "update_conversation_language":
+        language = arguments.get("language", "")
+        if language:
+            await update_conversation_language(language)
+            response = f"Language set to '{language}'. Continue speaking in this language."
+        else:
+            response = "Language code not provided."
+    
     else:
         response = f"Function '{function_name}' is not recognized."
 
@@ -372,58 +373,165 @@ class Agent:
         return json.loads(message)
 
     # @traceable
-    async def startup(self, tools):
+    async def startup(self, tools, retry_count: int = 0):
         """
-        Инициализация WebSocket соединения с загрузкой сохраненного контекста диалога.
-        При перезапуске восстанавливает последние 3 пары реплик для сохранения преемственности.
+        Initialization of WebSocket connection with loading of the saved game session context.
+        Upon restart restores:
+        - The last 3 pairs of dialogue exchanges
+        - Game information (name, description)
+        - The current player goal
+        - Key focus points and notes
+        Args:
+            tools: List of tools for Gemini
+            retry_count: Retry counter (for internal use)
         """
         
-        # Загружаем сохраненный контекст диалога (если есть)
-        saved_context = self.global_context.load_conversation_context()
-        
-        # Формируем системную инструкцию с учетом истории диалога
-        enhanced_system_instruction = system_instruction
-        
-        if saved_context and saved_context.get("recent_conversation"):
-            # Добавляем информацию о предыдущем диалоге в системную инструкцию
-            conversation_summary = "\n\n--- КОНТЕКСТ ПРЕДЫДУЩЕГО ДИАЛОГА ---\n"
-            conversation_summary += "Вот последние реплики из нашего предыдущего разговора:\n\n"
+        try:
+            import copy
             
-            for role, text in saved_context["recent_conversation"]:
-                if role == "user":
-                    conversation_summary += f"Игрок: {text}\n"
-                elif role == "assistant":
-                    conversation_summary += f"Ассистент: {text}\n"
+            has_context = (
+                len(self.global_context.conversation_history) > 0
+                or (self.global_context.game and self.global_context.game != "Unknown")
+                or self.global_context.player_goal 
+            )
             
-            conversation_summary += "\nПродолжай диалог естественно, учитывая этот контекст.\n"
-            conversation_summary += "--- КОНЕЦ КОНТЕКСТА ---\n"
+            logging.info("="*60)
+            logging.info("CONTEXT CHECK:")
+            logging.info(f"  - Conversation history: {len(self.global_context.conversation_history)} messages")
+            logging.info(f"  - Game: '{self.global_context.game}'")
+            logging.info(f"  - Player goal: '{self.global_context.player_goal}'")
+            logging.info(f"  - Language: '{self.global_context.conversation_language}'")
+            logging.info(f"  - Has context: {has_context}")
+            logging.info("="*60)
             
-            enhanced_system_instruction += conversation_summary
-            logging.info(f"Восстановлено {len(saved_context['recent_conversation'])} реплик из предыдущего диалога")
+            if has_context:
+                enhanced_system_instruction = copy.deepcopy(system_instruction_reconnection)
+                logging.info("Using system_instruction_reconnection (reconnection mode)")
+            else:
+                enhanced_system_instruction = copy.deepcopy(system_instruction)
+                logging.info("Using system_instruction (first start mode)")
+            
+            base_instruction_text = enhanced_system_instruction["parts"][0]["text"]
+            
+            if has_context:
+                # On reconnection, take DATA from RAM (self.global_context)
+                # (instructions are already in system_instruction_reconnection)
+                context_parts = []
+                
+                if self.global_context.conversation_language:
+                    lang = self.global_context.conversation_language
+                    language_info = "\n\n" + "#"*80 + "\n"
+                    language_info += "CRITICAL: LANGUAGE INSTRUCTION (READ FIRST!)\n"
+                    language_info += "#"*80 + "\n\n"
+                    language_info += f"⚠️ CONVERSATION LANGUAGE: '{lang.upper()}'\n\n"
+                    language_info += f"The player speaks '{lang}' (ISO 639-1 code).\n"
+                    language_info += f"Previous dialogue was in this language.\n"
+                    language_info += f"YOU MUST CONTINUE speaking ONLY in '{lang}' language!\n"
+                    language_info += f"DO NOT switch to English or any other language.\n"
+                    language_info += f"Respond naturally in '{lang}' as if the conversation never stopped.\n\n"
+                    language_info += "#"*80 + "\n"
+                    context_parts.append(language_info)
+                    logging.info(f"Language from RAM: {lang}")
+                
+                if self.global_context.game and self.global_context.game != "Unknown":
+                    game_info = f"\n\n--- GAME INFORMATION (YOU ALREADY KNOW THIS!) ---\n"
+                    game_info += f"Game: {self.global_context.game}\n"
+                    game_info += "⚠️ DO NOT ask 'Is this [game]?' or 'Did I identify correctly?' - YOU ALREADY KNOW!\n"
+                    game_info += "⚠️ DO NOT ask player to confirm the game - just use this information!\n\n"
+                    
+                    if self.global_context.game_description:
+                        game_info += f"Description: {self.global_context.game_description}\n"
+                    
+                    if self.global_context.focus_points:
+                        game_info += f"Key aspects: {', '.join(self.global_context.focus_points)}\n"
+                    
+                    game_info += "--- END OF GAME INFORMATION ---\n"
+                    context_parts.append(game_info)
+                    logging.info(f"Game from RAM: '{self.global_context.game}'")
+                
+                if self.global_context.player_goal:
+                    goal_info = f"\n--- CURRENT PLAYER GOAL (YOU ALREADY KNOW THIS!) ---\n"
+                    goal_info += f"Goal: {self.global_context.player_goal}\n\n"
+                    goal_info += "⚠️ DO NOT ask 'What's your goal?' - YOU ALREADY KNOW!\n"
+                    goal_info += "⚠️ DO NOT ask player to tell you their goal - just help achieve it!\n"
+                    goal_info += "✅ IMMEDIATELY help with this goal without asking about it.\n\n"
+                    goal_info += "If the player states a NEW goal, update it using the update_player_goal tool.\n"
+                    goal_info += "--- END OF GOAL ---\n"
+                    context_parts.append(goal_info)
+                    logging.info(f"Goal from RAM: '{self.global_context.player_goal}'")
+                
+                recent_conv = self.global_context.get_recent_conversation(num_pairs=3)
+                if recent_conv:
+                    conversation_summary = "\n--- PREVIOUS DIALOGUE CONTEXT ---\n"
+                    conversation_summary += "Here are the latest lines from our previous conversation:\n\n"
+                    
+                    for role, text in recent_conv:
+                        if role == "user":
+                            conversation_summary += f"Player: {text}\n"
+                        elif role == "assistant":
+                            conversation_summary += f"Assistant: {text}\n"
+                    
+                    conversation_summary += "\nContinue the dialogue naturally, taking this context into account.\n"
+                    conversation_summary += "--- END OF DIALOGUE CONTEXT ---\n"
+                    context_parts.append(conversation_summary)
+                    logging.info(f"Conversation from RAM: {len(recent_conv)} messages")
+                
+                recent_notes = self.global_context.notes[-5:] if len(self.global_context.notes) > 5 else self.global_context.notes
+                if recent_notes:
+                    notes_info = f"\n--- IMPORTANT NOTES ---\n"
+                    for i, note in enumerate(recent_notes, 1):
+                        notes_info += f"{i}. {note}\n"
+                    notes_info += "--- END OF NOTES ---\n"
+                    context_parts.append(notes_info)
+                    logging.info(f"Notes from RAM: {len(recent_notes)} notes")
+                
+                if context_parts:
+                    enhanced_system_instruction["parts"][0]["text"] = base_instruction_text + "\n".join(context_parts)
+                    logging.info(f"Context sections added: {len(context_parts)} sections")
+                    logging.info(f"Total instruction length: {len(enhanced_system_instruction['parts'][0]['text'])} characters")
 
-        setup_msg = {
-            "setup": {
-                "model": f"models/{MODEL}",
-                "generation_config":
-                    {
-                    "speech_config":
+            setup_msg = {
+                "setup": {
+                    "model": f"models/{MODEL}",
+                    "generation_config":
                         {
-                            "voice_config": {
-                        "prebuilt_voice_config": {
-                            "voice_name": self.chosen_voice #os.getenv("VOICE_NAME")
+                        "speech_config":
+                            {
+                                "voice_config": {
+                            "prebuilt_voice_config": {
+                                "voice_name": self.chosen_voice #os.getenv("VOICE_NAME")
+                            }
                         }
-                    }
+                            },
+                        "temperature": 0,
                         },
-                    "temperature": 0,
-                    },
-                "system_instruction": enhanced_system_instruction,
-                "tools": tools
+                    "system_instruction": enhanced_system_instruction,
+                    "tools": tools
+                }
             }
-        }
-        await self.ws_client.force_send(json.dumps(setup_msg))
-        # setup_response = await self.ws_client.force_receive()
-        setup_response = await self.receive_from_gemini()
-        logging.info("WebSocket connection established and setup complete.")
+            await self.ws_client.force_send(json.dumps(setup_msg))
+            # setup_response = await self.ws_client.force_receive()
+            setup_response = await self.receive_from_gemini()
+            logging.info("WebSocket connection established and setup complete.")
+            
+        except Exception as e:
+            logging.error(f"WebSocket initialization error (attempt {retry_count + 1}/3): {e}")
+            
+            if retry_count < 2:
+                retry_delay = 2 ** retry_count
+                logging.info(f"Retry attempt in {retry_delay} seconds...")
+                await asyncio.sleep(retry_delay)
+                
+                try:
+                    await self.ws_client.disconnect()
+                    await self.ws_client.init_connect()
+                except Exception as reconnect_error:
+                    logging.warning(f"Reconnection error: {reconnect_error}")
+                
+                return await self.startup(tools, retry_count=retry_count + 1)
+            else:
+                logging.error("All WebSocket connection attempts exhausted")
+                raise 
 
 
     # @traceable
@@ -519,12 +627,28 @@ Assistant:
 
     # @traceable
     async def run_background_analysis(self, frames: List[str]):
-        """Run background analysis on collected frames."""
+        """
+        Run background analysis on collected frames.
+        Auto-detects game if unknown and saves to global_context.
+        """
         logging.info("Running background analysis...")
         # Analyze last 30 frames for detailed insights
         if len(frames) >= 10:
             # Use a subset of frames for analysis to save processing
             recent_frames = frames[-10:]
+            
+            if self.global_context.game == "Unknown":
+                try:
+                    logging.info("Game not detected, attempting to detect from frames...")
+                    game_detection = await asyncio.to_thread(detect_game_and_focus_points, recent_frames)
+                    if game_detection.get("game") and game_detection["game"] != "Unknown":
+                        self.global_context.game = game_detection["game"]
+                        self.global_context.focus_points = game_detection.get("focus_points", [])
+                        logging.info(f"Game auto-detected: '{self.global_context.game}'")
+                        logging.info(f"Focus points: {self.global_context.focus_points}")
+                except Exception as e:
+                    logging.warning(f"Auto game detection error: {e}")
+            
             context = Context(
                 game=self.global_context.game,
                 category=self.global_context.category,
@@ -606,10 +730,6 @@ Assistant:
 
     # @traceable
     async def receive_audio(self):
-        """
-        Получает голосовые ответы от модели и воспроизводит их.
-        Также отслеживает текстовые ответы ассистента для сохранения в историю диалога.
-        """
         while True:
             # raw_response = await self.ws_client.force_receive()
             response_dict = await self.receive_from_gemini()
@@ -629,7 +749,6 @@ Assistant:
                 pcm_data = base64.b64decode(inline_data)
                 self.audio_in_queue.put_nowait(pcm_data)
 
-            # Извлекаем текстовый ответ ассистента (если есть) для сохранения в историю
             text_part = (
                 response_dict
                 .get("serverContent", {})
@@ -638,9 +757,8 @@ Assistant:
                 .get("text")
             )
             if text_part and text_part.strip():
-                # Сохраняем ответ ассистента в историю
                 self.global_context.add_message("assistant", text_part.strip())
-                logging.info(f"Ответ ассистента добавлен в историю: {text_part[:50]}...")
+                logging.info(f"Assistant response added to history: {text_part[:50]}...")
 
             try:
                 turn_complete = response_dict["serverContent"]["turnComplete"]
@@ -657,20 +775,15 @@ Assistant:
                         self.audio_in_queue.get_nowait()
                         print("Removed audio from queue", time.time())
                     
-                    # Проверка на необходимость переподключения
                     if monotonic() - self._last_connection_time > self.RECONNECTION_INTERVAL:
                         self._last_connection_time = monotonic()
-                        
-                        # ВАЖНО: Сохраняем контекст диалога ПЕРЕД переподключением
-                        logging.info("Время переподключения. Сохраняем контекст диалога...")
-                        self.global_context.save_conversation_context()
-                        
-                        # Переподключаемся
+
+                        logging.info("Reconnection time. Context remains in RAM...")
                         await self.ws_client.disconnect()
                         await self.ws_client.init_connect()
                         await self.startup(tools=[{'function_declarations': tools_custom},
                                                   {'google_search': {}}])
-                        logging.info("Переподключение завершено с восстановлением контекста")
+                        logging.info("Reconnection completed. Context preserved in memory.")
 
             tool_call = response_dict.get('toolCall')
             if tool_call is not None:
@@ -741,7 +854,11 @@ Assistant:
 
     # @traceable
     def handle_server_content(self, server_content):
-        """Handle additional server content if needed."""
+        """
+        Handle additional server content.
+        CRITICAL: Also saves player's voice messages (userTurn) to conversation history.
+        """
+        logging.info(f"[DEBUG] serverContent keys: {list(server_content.keys())}")
         model_turn = server_content.get('modelTurn')
         if model_turn:
             parts = model_turn.get('parts', [])
@@ -761,6 +878,18 @@ Assistant:
                     logging.info(code_execution_result.get('output', ''))
                     logging.info("```")
                     logging.info("-------------------------------")
+        
+        user_turn = server_content.get('userTurn')
+        logging.info(f"[DEBUG] userTurn present: {user_turn is not None}")
+        if user_turn:
+            parts = user_turn.get('parts', [])
+            logging.info(f"[DEBUG] userTurn parts count: {len(parts)}")
+            for part in parts:
+                text_part = part.get('text')
+                logging.info(f"[DEBUG] userTurn text: {text_part}")
+                if text_part and text_part.strip():
+                    self.global_context.add_message("user", text_part.strip())
+                    logging.info(f"✅ Player voice message saved: {text_part[:50]}...")
 
         grounding_metadata = server_content.get('groundingMetadata')
         if grounding_metadata:
@@ -774,38 +903,65 @@ Assistant:
 
     # @traceable
     async def run(self):
-        """Run the agent by establishing WebSocket connection and starting tasks."""
         process.start()
-        try:
-            await self.ws_client.init_connect()
-            async with asyncio.TaskGroup() as tg:
-                await self.startup(tools=[{'function_declarations': tools_custom},
-                                   {'google_search': {}}])
-                await self.ws_client.disconnect()
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
+            try:
                 await self.ws_client.init_connect()
-                await self.startup(tools=[{'function_declarations': tools_custom},
-                                   {'google_search': {}}])
-                self.audio_in_queue = asyncio.Queue()
-                self.out_queue = asyncio.Queue(maxsize=10)
+                async with asyncio.TaskGroup() as tg:
+                    await self.startup(tools=[{'function_declarations': tools_custom},
+                                       {'google_search': {}}])
+                    
+                    await self.ws_client.disconnect()
+                    await self.ws_client.init_connect()
+                    await self.startup(tools=[{'function_declarations': tools_custom},
+                                       {'google_search': {}}])
+                    
+                    self.audio_in_queue = asyncio.Queue()
+                    self.out_queue = asyncio.Queue(maxsize=10)
 
-                # Start concurrent tasks
-                tg.create_task(self.send_realtime())
-                tg.create_task(self.listen_audio())
-                tg.create_task(self.stream_screen_frames())
-                tg.create_task(self.receive_audio())
-                tg.create_task(self.play_audio())
-                tg.create_task(self.send_text())
-                tg.create_task(self.run_background_tasks(tg))
+                    tg.create_task(self.send_realtime())
+                    tg.create_task(self.listen_audio())
+                    tg.create_task(self.stream_screen_frames())
+                    tg.create_task(self.receive_audio())
+                    tg.create_task(self.play_audio())
+                    tg.create_task(self.send_text())
+                    tg.create_task(self.run_background_tasks(tg))
+                
+                break
 
-
-        except asyncio.CancelledError:
-            logging.info("Agent shutdown requested.")
-        except Exception as e:
-            logging.error("An error occurred:", exc_info=True)
-            if self.audio_stream:
-                self.audio_stream.close()
-        finally:
+            except asyncio.CancelledError:
+                logging.info("Agent shutdown requested.")
+                break
+                
+            except Exception as e:
+                retry_count += 1
+                logging.error(f"Critical agent error (attempt {retry_count}/{max_retries}): {e}", exc_info=True)
+                
+                if retry_count < max_retries:
+                    retry_delay = 2 ** retry_count
+                    logging.info(f"Agent restart in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay)
+                    
+                    try:
+                        if self.audio_stream:
+                            self.audio_stream.close()
+                            self.audio_stream = None
+                        await self.ws_client.disconnect()
+                    except Exception as cleanup_error:
+                        logging.warning(f"Resource cleanup error: {cleanup_error}")
+                else:
+                    logging.error("All agent startup attempts exhausted")
+                    if self.audio_stream:
+                        self.audio_stream.close()
+                    raise
+                    
+        try:
             await self.ws_client.disconnect()
+        except Exception as disconnect_error:
+            logging.warning(f"Final WebSocket disconnect error: {disconnect_error}")
 
 def cogamer(chosen_voice="Fenrir"):
     agent = Agent(global_context=global_context, chosen_voice=chosen_voice)

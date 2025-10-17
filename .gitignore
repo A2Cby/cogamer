@@ -166,10 +166,15 @@ app.log
 .idea
 
 # Cursor
-cursor/
+.cursor/
 .cursorrules
 
 # Other
 frame_analysis_*
 *.npy
 *.mp4
+
+# Runtime data files (персональные данные пользователя)
+data/conversation_context.json
+data/analysis_reports/
+user_preferences.txt

@@ -41,3 +41,6 @@ urllib3==2.3.0
 websockets==14.1
 zope.interface==7.2
 dependency-injector==4.48.2
+pyarmor==9.1.9
+pyarmor.cli.core==7.6.8
+tinyaes==1.1.1

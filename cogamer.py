@@ -28,7 +28,7 @@ from typing import List, Dict
 from langchain_openai import ChatOpenAI
 from schemas import FrameAnalysis, Context, DetectGameFocusPoints
 from langchain_core.messages import HumanMessage
-from containers import CogamerContainer
+# from containers import CogamerContainer
 
 import os, ssl
 
@@ -41,6 +41,8 @@ CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE = 512
+from logger import logger
+from ws_client import WebSocketClient
 
 # Model and API settings
 HOST = "generativelanguage.googleapis.com"
@@ -54,6 +56,7 @@ model = ChatOpenAI(model="gpt-4.1-mini", api_key=OPENAI_API_KEY)
 structured_llm_frame_analysis = model.with_structured_output(FrameAnalysis)
 structured_llm_detect_game_focus_points = model.with_structured_output(DetectGameFocusPoints)
 
+ws_client = WebSocketClient(uri=URI, logger=logger)
 
 class GlobalContext:
     def __init__(self):
@@ -332,8 +335,8 @@ async def handle_tool_call(ws, tool_call):
 
 class Agent:
     RECONNECTION_INTERVAL = 60*7  # seconds
-    def __init__(self, parent_connection, global_context: GlobalContext, chosen_voice: str ="Fenrir"):
-        self._parent_connection = parent_connection
+    def __init__(self, global_context: GlobalContext, chosen_voice: str ="Fenrir"):
+        # self._parent_connection = parent_connection
         self.global_context = global_context
         self.ws = None
         self.audio_in_queue = None
@@ -345,7 +348,8 @@ class Agent:
         self._ssl_context = ssl.create_default_context()
         self._ssl_context.check_hostname = False
         self._ssl_context.verify_mode = ssl.CERT_NONE
-        self.ws_client = CogamerContainer.ws_client()
+        # self.ws_client = CogamerContainer.ws_client()
+        self.ws_client = ws_client
         self._last_connection_time: float = time.monotonic()
 
     async def send_to_gemini(self, message: dict):
@@ -745,7 +749,7 @@ Assistant:
                 .get("data")
             )
             if inline_data:
-                self._parent_connection.send(VideoType.SPEECH)
+                # self._parent_connection.send(VideoType.SPEECH)
                 pcm_data = base64.b64decode(inline_data)
                 self.audio_in_queue.put_nowait(pcm_data)
 
@@ -770,7 +774,7 @@ Assistant:
                     # For interruptions to work, we need to empty out the audio queue
                     # Because it may have loaded much more audio than has played yet.
                     print("\nEnd of turn in receive audio ", time.time())
-                    self._parent_connection.send(VideoType.SILENCE)
+                    # self._parent_connection.send(VideoType.SILENCE)
                     while not self.audio_in_queue.empty():
                         self.audio_in_queue.get_nowait()
                         print("Removed audio from queue", time.time())
@@ -903,7 +907,7 @@ Assistant:
 
     # @traceable
     async def run(self):
-        process.start()
+        # process.start()
         retry_count = 0
         max_retries = 3
         
@@ -963,22 +967,15 @@ Assistant:
         except Exception as disconnect_error:
             logging.warning(f"Final WebSocket disconnect error: {disconnect_error}")
 
-def cogamer(chosen_voice="Fenrir"):
-    agent = Agent(global_context=global_context, chosen_voice=chosen_voice)
-    try:
-        asyncio.run(agent.run())
-    except KeyboardInterrupt:
-        logging.info("Agent terminated by user.")
-
 # -----------------------------
 # Main Execution
 # -----------------------------
 
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
-    parent_conn, child_conn = multiprocessing.Pipe()
-    agent = Agent(parent_connection=parent_conn, global_context=global_context, chosen_voice="Fenrir")
-    process = multiprocessing.Process(target=player_process, args=(child_conn,))
+    # multiprocessing.freeze_support()
+    # parent_conn, child_conn = multiprocessing.Pipe()
+    agent = Agent(global_context=global_context, chosen_voice="Fenrir")
+    # process = multiprocessing.Process(target=player_process, args=(child_conn,))
     try:
         asyncio.run(agent.run())
     except KeyboardInterrupt:

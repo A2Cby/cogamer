@@ -14,9 +14,10 @@ import time
 import os, sys
 from dotenv import load_dotenv
 import multiprocessing
-
+from logger import logger
 from prompts.prompts import tools_custom, system_instruction, system_instruction_reconnection
 from video_player import VideoType,  player_process
+from ws_client import WebSocketClient
 
 base_path = getattr(sys, "_MEIPASS", os.getcwd())
 dotenv_path = os.path.join(base_path, ".env")
@@ -28,7 +29,6 @@ from typing import List, Dict
 from langchain_openai import ChatOpenAI
 from schemas import FrameAnalysis, Context, DetectGameFocusPoints
 from langchain_core.messages import HumanMessage
-from containers import CogamerContainer
 
 import os, ssl
 
@@ -53,7 +53,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 model = ChatOpenAI(model="gpt-4.1-mini", api_key=OPENAI_API_KEY)
 structured_llm_frame_analysis = model.with_structured_output(FrameAnalysis)
 structured_llm_detect_game_focus_points = model.with_structured_output(DetectGameFocusPoints)
-
+ws_client = WebSocketClient(uri=URI, logger=logger)
 
 class GlobalContext:
     def __init__(self):
@@ -345,7 +345,7 @@ class Agent:
         self._ssl_context = ssl.create_default_context()
         self._ssl_context.check_hostname = False
         self._ssl_context.verify_mode = ssl.CERT_NONE
-        self.ws_client = CogamerContainer.ws_client()
+        self.ws_client = ws_client
         self._last_connection_time: float = time.monotonic()
 
     async def send_to_gemini(self, message: dict):

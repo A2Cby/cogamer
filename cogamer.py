@@ -510,8 +510,27 @@ class Agent:
                 }
             }
             await self.ws_client.force_send(json.dumps(setup_msg))
-            # setup_response = await self.ws_client.force_receive()
-            setup_response = await self.receive_from_gemini()
+            # setup_response = await self.receive_from_gemini()
+            if not has_context:
+                frame_b64 = await asyncio.to_thread(self._capture_screen_frame)
+
+                first_turn_msg = {
+                    "client_content": {
+                        "turn_complete": True,
+                        "turns": [
+                            {
+                                "role": "user",
+                                "parts": [
+                                    {"text": "[START SESSION]"},
+                                    {"inline_data": {"mime_type": "image/jpeg", "data": frame_b64}}
+                                ]
+                            }
+                        ],
+                    }
+                }
+                await self.ws_client.force_send(json.dumps(first_turn_msg))
+                logging.info(f"Greeting message")
+
             logging.info("WebSocket connection established and setup complete.")
             
         except Exception as e:

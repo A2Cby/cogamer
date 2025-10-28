@@ -68,6 +68,10 @@ class GlobalContext:
         self.frame_analysis_results = []
         self.player_goal = "" 
         self.conversation_language = None
+        self.session_started = False
+
+    def mark_session_started(self):
+        self.session_started = True
 
     # @traceable
     def add_message(self, role: str, text: str):
@@ -358,19 +362,22 @@ class Agent:
                                       {'google_search': {}}])
             await self.ws_client.send(json_msg)
         logging.info("Message sent to assistant.")
-
+    
     async def receive_from_gemini(self) -> dict | None:
         try:
             message = await self.ws_client.receive()
         except (self.ws_client.WebSocketConnectionError, self.ws_client.WebSocketConnectionClosed):
             await self.ws_client.connect()
             await self.startup(tools=[{'function_declarations': tools_custom},
-                                      {'google_search': {}}])
-            message = await self.ws_client.receive()  # todo: check!!! Maybe del!
+                                    {'google_search': {}}])
+            message = await self.ws_client.receive()
         except Exception as e:
-            self._logger.warning(f"Failed to receive message: {e}")
+            # was: self._logger.warning(...)
+            logging.warning(f"Failed to receive message: {e}")
             return None
         return json.loads(message)
+
+    from time import monotonic
 
     # @traceable
     async def startup(self, tools, retry_count: int = 0):
@@ -510,26 +517,6 @@ class Agent:
                 }
             }
             await self.ws_client.force_send(json.dumps(setup_msg))
-            # setup_response = await self.receive_from_gemini()
-            if not has_context:
-                frame_b64 = await asyncio.to_thread(self._capture_screen_frame)
-
-                first_turn_msg = {
-                    "client_content": {
-                        "turn_complete": True,
-                        "turns": [
-                            {
-                                "role": "user",
-                                "parts": [
-                                    {"text": "[START SESSION]"},
-                                    {"inline_data": {"mime_type": "image/jpeg", "data": frame_b64}}
-                                ]
-                            }
-                        ],
-                    }
-                }
-                await self.ws_client.force_send(json.dumps(first_turn_msg))
-                logging.info(f"Greeting message")
 
             logging.info("WebSocket connection established and setup complete.")
             
@@ -915,6 +902,32 @@ Assistant:
             # Handle grounding metadata if needed
             pass
 
+    async def _start_session_once(self, total_timeout: float = 6.0):
+        if self.global_context.session_started:
+            return
+
+        frame_b64 = await asyncio.to_thread(self._capture_screen_frame)
+
+        first_turn_msg = {
+            "client_content": {
+                "turn_complete": True,
+                "turns": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"text": "[START SESSION]"},
+                            {"inline_data": {"mime_type": "image/jpeg", "data": frame_b64}}
+                        ]
+                    }
+                ],
+            }
+        }
+
+        await self.ws_client.force_send(json.dumps(first_turn_msg))
+        logging.info("START_SESSION sent")
+
+        self.global_context.session_started = True
+
     # @traceable
     async def run_background_tasks(self, task_group: asyncio.TaskGroup):
         """Run background tasks such as periodic context updates."""
@@ -933,10 +946,7 @@ Assistant:
                     await self.startup(tools=[{'function_declarations': tools_custom},
                                        {'google_search': {}}])
                     
-                    await self.ws_client.disconnect()
-                    await self.ws_client.init_connect()
-                    await self.startup(tools=[{'function_declarations': tools_custom},
-                                       {'google_search': {}}])
+                    await self._start_session_once(total_timeout=6.0)
                     
                     self.audio_in_queue = asyncio.Queue()
                     self.out_queue = asyncio.Queue(maxsize=10)
@@ -946,7 +956,7 @@ Assistant:
                     tg.create_task(self.stream_screen_frames())
                     tg.create_task(self.receive_audio())
                     tg.create_task(self.play_audio())
-                    tg.create_task(self.send_text())
+                    # tg.create_task(self.send_text())
                     tg.create_task(self.run_background_tasks(tg))
                 
                 break

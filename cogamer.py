@@ -887,6 +887,14 @@ Assistant:
         
         user_turn = server_content.get('userTurn')
         logging.info(f"[DEBUG] userTurn present: {user_turn is not None}")
+
+        logging.info("="*60)
+        logging.info("CONTEXT CHECK:")
+        logging.info(f"  - Conversation history: {len(self.global_context.conversation_history)} messages")
+        logging.info(f"  - Game: '{self.global_context.game}'")
+        logging.info(f"  - Player goal: '{self.global_context.player_goal}'")
+        logging.info(f"  - Language: '{self.global_context.conversation_language}'")
+        logging.info("="*60)
         if user_turn:
             parts = user_turn.get('parts', [])
             logging.info(f"[DEBUG] userTurn parts count: {len(parts)}")
@@ -902,7 +910,7 @@ Assistant:
             # Handle grounding metadata if needed
             pass
 
-    async def _start_session_once(self, total_timeout: float = 6.0):
+    async def _start_session_once(self):
         if self.global_context.session_started:
             return
 
@@ -915,18 +923,25 @@ Assistant:
                     {
                         "role": "user",
                         "parts": [
-                            {"text": "[START SESSION]"},
-                            {"inline_data": {"mime_type": "image/jpeg", "data": frame_b64}}
+                            {
+                                "text": f"This is first line"
+                            },
+                            {
+                                "inline_data": {
+                                    "mime_type": "image/jpeg",
+                                    "data": frame_b64
+                                }
+                            }
                         ]
                     }
-                ],
+                ]
             }
         }
 
-        await self.ws_client.force_send(json.dumps(first_turn_msg))
+        await self.ws_client.send(json.dumps(first_turn_msg))
         logging.info("START_SESSION sent")
 
-        self.global_context.session_started = True
+        self.global_context.mark_session_started()
 
     # @traceable
     async def run_background_tasks(self, task_group: asyncio.TaskGroup):
@@ -946,8 +961,8 @@ Assistant:
                     await self.startup(tools=[{'function_declarations': tools_custom},
                                        {'google_search': {}}])
                     
-                    await self._start_session_once(total_timeout=6.0)
-                    
+                    await self._start_session_once()
+
                     self.audio_in_queue = asyncio.Queue()
                     self.out_queue = asyncio.Queue(maxsize=10)
 

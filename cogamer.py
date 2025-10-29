@@ -336,8 +336,7 @@ async def handle_tool_call(ws, tool_call):
 
 class Agent:
     RECONNECTION_INTERVAL = 60*7  # seconds
-    def __init__(self, parent_connection, global_context: GlobalContext, chosen_voice: str ="Fenrir"):
-        self._parent_connection = parent_connection
+    def __init__(self, global_context: GlobalContext, chosen_voice: str ="Fenrir"):
         self.global_context = global_context
         self.ws = None
         self.audio_in_queue = None
@@ -751,7 +750,6 @@ Assistant:
                 .get("data")
             )
             if inline_data:
-                self._parent_connection.send(VideoType.SPEECH)
                 pcm_data = base64.b64decode(inline_data)
                 self.audio_in_queue.put_nowait(pcm_data)
 
@@ -776,7 +774,6 @@ Assistant:
                     # For interruptions to work, we need to empty out the audio queue
                     # Because it may have loaded much more audio than has played yet.
                     print("\nEnd of turn in receive audio ", time.time())
-                    self._parent_connection.send(VideoType.SILENCE)
                     while not self.audio_in_queue.empty():
                         self.audio_in_queue.get_nowait()
                         print("Removed audio from queue", time.time())
@@ -950,7 +947,6 @@ Assistant:
 
     # @traceable
     async def run(self):
-        process.start()
         retry_count = 0
         max_retries = 3
         
@@ -971,7 +967,6 @@ Assistant:
                     tg.create_task(self.stream_screen_frames())
                     tg.create_task(self.receive_audio())
                     tg.create_task(self.play_audio())
-                    # tg.create_task(self.send_text())
                     tg.create_task(self.run_background_tasks(tg))
                 
                 break
@@ -1019,10 +1014,7 @@ def cogamer(chosen_voice="Fenrir"):
 # -----------------------------
 
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
-    parent_conn, child_conn = multiprocessing.Pipe()
-    agent = Agent(parent_connection=parent_conn, global_context=global_context, chosen_voice="Fenrir")
-    process = multiprocessing.Process(target=player_process, args=(child_conn,))
+    agent = Agent(global_context=global_context, chosen_voice="Fenrir")
     try:
         asyncio.run(agent.run())
     except KeyboardInterrupt:
